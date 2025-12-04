@@ -8,7 +8,7 @@
 ![Views](https://img.shields.io/github/watchers/Mytai20100/tunnel?style=social)
 ![Pulls](https://img.shields.io/github/downloads/Mytai20100/tunnel/total)
 
-**A high-performance mining pool proxy with real-time monitoring and analytics**
+**A high-performance tunnel proxy with real-time monitoring and analytics**
 
 [Features](#features) • [Installation](#installation) • [Usage](#usage) • [API](#api) • [Configuration](#configuration)
 
