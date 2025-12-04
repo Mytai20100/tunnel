@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"flag" 
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +27,7 @@ import (
 )
 
 const (
+	VERSION     = "3.3"
 	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"
 	ColorGreen  = "\033[32m"
@@ -132,6 +135,7 @@ type LogMessage struct {
 }
 
 var (
+	tlsConfig *tls.Config
 	config         Config
 	dataDB         *sql.DB
 	systemDB       *sql.DB
@@ -156,6 +160,14 @@ var (
 	
 	shareBatchChan   = make(chan ShareRecord, 10000)
 	trafficBatchChan = make(chan TrafficRecord, 10000)
+	flagNoData  = flag.Bool("nodata", false, "Disable database logging")
+	flagNoAPI   = flag.Bool("noapi", false, "Disable API server")
+	flagNoDebug = flag.Bool("nodebug", false, "Minimal output mode (single line status)")
+	flagTLS     = flag.Bool("tls", false, "Enable TLS support for miner connections")
+	flagHelp    = flag.Bool("help", false, "Show help message")
+	flagVersion = flag.Bool("version", false, "Show version")
+	flagTLSCert = flag.String("tlscert", "cert.pem", "TLS certificate file")
+	flagTLSKey  = flag.String("tlskey", "key.pem", "TLS key file")
 )
 
 type ShareRecord struct {
@@ -177,17 +189,92 @@ type TrafficRecord struct {
 	PacketsReceived int64
 }
 
+func showHelp() {
+	fmt.Printf("Tunnel v%s - Mining Pool Proxy\n\n", VERSION)
+	fmt.Println("Usage: tunnel [options]")
+	fmt.Println("\nOptions:")
+	fmt.Println("  --nodata       Disable database logging")
+	fmt.Println("  --noapi        Disable API server")
+	fmt.Println("  --nodebug      Minimal output mode (single line status)")
+	fmt.Println("  --tls          Enable TLS support for miner connections")
+	fmt.Println("  --tlscert      TLS certificate file (default: cert.pem)")
+	fmt.Println("  --tlskey       TLS key file (default: key.pem)")
+	fmt.Println("  --help         Show this help message")
+	fmt.Println("  --version      Show version")
+	fmt.Println("\nExamples:")
+	fmt.Println("  tunnel                    # Run with default settings")
+	fmt.Println("  tunnel --nodata           # Run without database")
+	fmt.Println("  tunnel --nodebug          # Run with minimal output")
+	fmt.Println("  tunnel --tls              # Run with TLS support")
+	fmt.Println("  tunnel --nodata --noapi   # Run without database and API")
+}
+
+func Status() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		minersMutex.RLock()
+		activeMiners := len(miners)
+		minersMutex.RUnlock()
+		
+		uptime := time.Since(startTime)
+		uptimeStr := formatDuration(uptime)
+		fmt.Printf("\r\033[K")
+		fmt.Printf("Tunnel v%s | Uptime: %s | Miners: %d", 
+			VERSION, uptimeStr, activeMiners)
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+	
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
+	} else if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	} else if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
 func main() {
-	fmt.Printf("Tunnelv3.3 by mytai - Optimized Edition\n%s\n", strings.Repeat("-", 60))
+	flag.Parse()
+	fmt.Printf("Tunnel v%s by mytai\n%s\n", VERSION, strings.Repeat("-", 60))
+	if *flagVersion {
+		fmt.Printf("Tunnel v%s\n", VERSION)
+		return
+	}
+	if *flagHelp {
+		showHelp()
+		return
+	}
 	startTime = time.Now()
 	loadConfig()
-	initDatabases()
+	if !*flagNoData {
+		initDatabases()
+		go batchShareProcessor()
+		go batchTrafficProcessor()
+		go periodicTrafficSnapshot()
+		go cleanupOldData()
+	}
 	initSystemMetrics()
-	
-	go batchShareProcessor()
-	go batchTrafficProcessor()
-	go periodicTrafficSnapshot()
-	
+	if *flagTLS {
+		cert, err := tls.LoadX509KeyPair(*flagTLSCert, *flagTLSKey)
+		if err != nil {
+			log.Fatalf("Failed to load TLS certificate: %v", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		if !*flagNoDebug {
+			LogInfo("TLS enabled with cert: %s, key: %s", *flagTLSCert, *flagTLSKey)
+		}
+	}
 	var wg sync.WaitGroup
 	for tunnelName, tunnelConf := range config.Tunnels {
 		wg.Add(1)
@@ -196,16 +283,30 @@ func main() {
 			startTunnel(name, conf)
 		}(tunnelName, tunnelConf)
 	}
-	go startAPIServer()
+	if !*flagNoAPI {
+		go startAPIServer()
+	}
+	
 	go monitorPoolPings()
 	go updateSystemMetrics()
-	go cleanupOldData()
+	if !*flagNoDebug {
+		LogInfo("Loaded %d pools", len(config.Pools))
+		LogInfo("Tunnel Started")
+		LogInfo("Active tunnels: %d", len(config.Tunnels))
+		if !*flagNoAPI {
+			LogInfo("API server running on port %d", config.APIPort)
+		}
+		if *flagTLS {
+			LogInfo("TLS support enabled")
+		}
+		if *flagNoData {
+			LogInfo("Database logging disabled")
+		}
+		fmt.Printf("%s\n", strings.Repeat("-", 60))
+	} else {
+		go Status()
+	}
 	
-	LogInfo("Loaded %d pools", len(config.Pools))
-	LogInfo("Tunnel Started")
-	LogInfo("Active tunnels: %d", len(config.Tunnels))
-	LogInfo("API server running on port %d", config.APIPort)
-	fmt.Printf("%s\n", strings.Repeat("-", 60))
 	wg.Wait()
 }
 
@@ -226,7 +327,9 @@ func loadConfig() {
 			},
 		}
 		saveConfig()
-		LogWarning("Created default config.yml")
+		if !*flagNoDebug {
+			LogWarning("Created default config.yml")
+		}
 	} else {
 		data, err := os.ReadFile(configFile)
 		if err != nil {
@@ -236,7 +339,9 @@ func loadConfig() {
 		if err != nil {
 			log.Fatalf("Error parsing config: %v", err)
 		}
-		LogInfo("Loaded config.yml")
+		if !*flagNoDebug {
+			LogInfo("Loaded config.yml")
+		}
 	}
 }
 
@@ -280,7 +385,9 @@ func initDatabases() {
 	}
 	
 	createTables()
-	LogInfo("Database connected (data.db + system.db - Pure Go)")
+	if !*flagNoDebug {
+		LogInfo("Database connected (data.db + system.db - Pure Go)")
+	}
 }
 
 func createTables() {
@@ -352,6 +459,9 @@ func createTables() {
 }
 
 func batchShareProcessor() {
+	if *flagNoData {
+		return
+	}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	
@@ -413,6 +523,9 @@ func insertShareBatch(batch []ShareRecord) {
 }
 
 func batchTrafficProcessor() {
+	if *flagNoData {
+		return
+	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	
@@ -503,7 +616,9 @@ func cleanupOldData() {
 		systemDB.Exec("VACUUM")
 		dataDB.Exec("VACUUM")
 		
-		LogInfo("Database cleanup completed")
+		if !*flagNoDebug {
+			LogInfo("Database cleanup completed")
+		}
 	}
 }
 
@@ -516,6 +631,10 @@ func getDBSize(dbPath string) int64 {
 }
 
 func saveMinerToDB(miner *MinerInfo) {
+	if *flagNoData {
+		return
+	}
+	
 	checkQuery := `SELECT id, shares_accepted, shares_rejected, bytes_download, bytes_upload, 
 		packets_sent, packets_received FROM miners 
 		WHERE wallet = ? AND ip = ? AND miner_name = ?`
@@ -548,7 +667,7 @@ func saveMinerToDB(miner *MinerInfo) {
 			miner.LastSeen, miner.PoolName, existingID)
 	}
 	
-	if err != nil {
+	if err != nil && !*flagNoDebug {
 		log.Printf("Failed to save miner to DB: %v", err)
 	}
 }
@@ -772,19 +891,38 @@ func startTunnel(tunnelName string, tunnelConf TunnelConfig) {
 	}
 	
 	addr := fmt.Sprintf("%s:%d", tunnelConf.IP, tunnelConf.Port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		LogError("Tunnel %s: Failed to listen on %s: %v", tunnelName, addr, err)
-		return
+	
+	var listener net.Listener
+	var err error
+	
+	// Create listener with or without TLS
+	if *flagTLS && tlsConfig != nil {
+		listener, err = tls.Listen("tcp", addr, tlsConfig)
+		if err != nil {
+			LogError("Tunnel %s: Failed to listen on %s (TLS): %v", tunnelName, addr, err)
+			return
+		}
+		if !*flagNoDebug {
+			LogDebug("Tunnel %s listening on %s (TLS) -> %s:%d (%s)", tunnelName, addr, poolConf.Host, poolConf.Port, poolConf.Name)
+		}
+	} else {
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			LogError("Tunnel %s: Failed to listen on %s: %v", tunnelName, addr, err)
+			return
+		}
+		if !*flagNoDebug {
+			LogDebug("Tunnel %s listening on %s -> %s:%d (%s)", tunnelName, addr, poolConf.Host, poolConf.Port, poolConf.Name)
+		}
 	}
 	defer listener.Close()
-	
-	LogDebug("Tunnel %s listening on %s -> %s:%d (%s)", tunnelName, addr, poolConf.Host, poolConf.Port, poolConf.Name)
 	
 	for {
 		clientConn, err := listener.Accept()
 		if err != nil {
-			LogError("Tunnel %s: Accept error: %v", tunnelName, err)
+			if !*flagNoDebug {
+				LogError("Tunnel %s: Accept error: %v", tunnelName, err)
+			}
 			continue
 		}
 		go handleConnection(tunnelName, clientConn, poolConf)
@@ -796,17 +934,23 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 	
 	clientAddr := clientConn.RemoteAddr().String()
 	clientIP, clientPort, _ := net.SplitHostPort(clientAddr)
-	LogDebug("New connection from %s:%s", clientIP, clientPort)
+	if !*flagNoDebug {
+		LogDebug("New connection from %s:%s", clientIP, clientPort)
+	}
 	
 	poolAddr := fmt.Sprintf("%s:%d", poolConf.Host, poolConf.Port)
 	poolConn, err := net.Dial("tcp", poolAddr)
 	if err != nil {
-		LogError("Failed to connect to pool %s: %v", poolAddr, err)
+		if !*flagNoDebug {
+			LogError("Failed to connect to pool %s: %v", poolAddr, err)
+		}
 		return
 	}
 	defer poolConn.Close()
 	
-	LogInfo("Connected to pool %s (%s)", poolAddr, poolConf.Name)
+	if !*flagNoDebug {
+		LogInfo("Connected to pool %s (%s)", poolAddr, poolConf.Name)
+	}
 	
 	minerKey := fmt.Sprintf("%s:%s", clientIP, clientPort)
 	minersMutex.Lock()
@@ -830,7 +974,9 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 	
 	<-done
 	
-	LogWarning("Connection closed for %s:%s", clientIP, clientPort)
+	if !*flagNoDebug {
+		LogWarning("Connection closed for %s:%s", clientIP, clientPort)
+	}
 	
 	minersMutex.Lock()
 	if miner, exists := miners[minerKey]; exists {
@@ -1109,23 +1255,33 @@ func LogAndBroadcast(level, color, format string, args ...interface{}) {
 }
 
 func LogInfo(format string, args ...interface{}) {
-	LogAndBroadcast("INFO", ColorGreen, format, args...)
+	if !*flagNoDebug {
+		LogAndBroadcast("INFO", ColorGreen, format, args...)
+	}
 }
 
 func LogError(format string, args ...interface{}) {
-	LogAndBroadcast("ERROR", ColorRed, format, args...)
+	if !*flagNoDebug {
+		LogAndBroadcast("ERROR", ColorRed, format, args...)
+	}
 }
 
 func LogWarning(format string, args ...interface{}) {
-	LogAndBroadcast("WARN", ColorYellow, format, args...)
+	if !*flagNoDebug {
+		LogAndBroadcast("WARN", ColorYellow, format, args...)
+	}
 }
 
 func LogShare(format string, args ...interface{}) {
-	LogAndBroadcast("SHARE", ColorPurple, format, args...)
+	if !*flagNoDebug {
+		LogAndBroadcast("SHARE", ColorPurple, format, args...)
+	}
 }
 
 func LogDebug(format string, args ...interface{}) {
-	LogAndBroadcast("DEBUG", ColorCyan, format, args...)
+	if !*flagNoDebug {
+		LogAndBroadcast("DEBUG", ColorCyan, format, args...)
+	}
 }
 
 func getColorName(colorCode string) string {
@@ -1525,9 +1681,8 @@ func handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	systemMtx.RUnlock()
 }
 func getCurrentTime() string {
-	return time.Now().Format("2025-01-02 15:04:05")
+	return time.Now().Format("2006-01-02 15:04:05")
 }
-
 func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
