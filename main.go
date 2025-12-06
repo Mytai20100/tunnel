@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
-	"crypto/tls"
+	"flag"
 	"fmt"
 	"log"
-	"flag" 
 	"net"
 	"net/http"
 	"os"
@@ -17,13 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	"gopkg.in/yaml.v2"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -96,15 +96,15 @@ type MinerInfo struct {
 }
 
 type PoolMetrics struct {
-	Name            string
-	CurrentPing     float64
-	AveragePing     float64
-	PingSamples     []float64
-	AvgAcceptTime   float64
-	AcceptTimes     []float64
-	SharesAccepted  int64
-	SharesRejected  int64
-	LastPingTime    time.Time
+	Name           string
+	CurrentPing    float64
+	AveragePing    float64
+	PingSamples    []float64
+	AvgAcceptTime  float64
+	AcceptTimes    []float64
+	SharesAccepted int64
+	SharesRejected int64
+	LastPingTime   time.Time
 }
 
 type SystemMetrics struct {
@@ -135,7 +135,7 @@ type LogMessage struct {
 }
 
 var (
-	tlsConfig *tls.Config
+	tlsConfig      *tls.Config
 	config         Config
 	dataDB         *sql.DB
 	systemDB       *sql.DB
@@ -152,22 +152,22 @@ var (
 	upgrader       = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
-	
+
 	totalDownloadAtomic   int64
 	totalUploadAtomic     int64
 	packetsSentAtomic     int64
 	packetsReceivedAtomic int64
-	
-	shareBatchChan   = make(chan ShareRecord, 10000)
+
+	shareBatchChan   = make(chan ShareRecord, 100000)
 	trafficBatchChan = make(chan TrafficRecord, 10000)
-	flagNoData  = flag.Bool("nodata", false, "Disable database logging")
-	flagNoAPI   = flag.Bool("noapi", false, "Disable API server")
-	flagNoDebug = flag.Bool("nodebug", false, "Minimal output mode (single line status)")
-	flagTLS     = flag.Bool("tls", false, "Enable TLS support for miner connections")
-	flagHelp    = flag.Bool("help", false, "Show help message")
-	flagVersion = flag.Bool("version", false, "Show version")
-	flagTLSCert = flag.String("tlscert", "cert.pem", "TLS certificate file")
-	flagTLSKey  = flag.String("tlskey", "key.pem", "TLS key file")
+	flagNoData       = flag.Bool("nodata", false, "Disable database logging")
+	flagNoAPI        = flag.Bool("noapi", false, "Disable API server")
+	flagNoDebug      = flag.Bool("nodebug", false, "Minimal output mode (single line status)")
+	flagTLS          = flag.Bool("tls", false, "Enable TLS support for miner connections")
+	flagHelp         = flag.Bool("help", false, "Show help message")
+	flagVersion      = flag.Bool("version", false, "Show version")
+	flagTLSCert      = flag.String("tlscert", "cert.pem", "TLS certificate file")
+	flagTLSKey       = flag.String("tlskey", "key.pem", "TLS key file")
 )
 
 type ShareRecord struct {
@@ -212,16 +212,16 @@ func showHelp() {
 func Status() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		minersMutex.RLock()
 		activeMiners := len(miners)
 		minersMutex.RUnlock()
-		
+
 		uptime := time.Since(startTime)
 		uptimeStr := formatDuration(uptime)
 		fmt.Printf("\r\033[K")
-		fmt.Printf("Tunnel v%s | Uptime: %s | Miners: %d", 
+		fmt.Printf("Tunnel v%s | Uptime: %s | Miners: %d",
 			VERSION, uptimeStr, activeMiners)
 	}
 }
@@ -231,7 +231,7 @@ func formatDuration(d time.Duration) string {
 	hours := int(d.Hours()) % 24
 	minutes := int(d.Minutes()) % 60
 	seconds := int(d.Seconds()) % 60
-	
+
 	if days > 0 {
 		return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
 	} else if hours > 0 {
@@ -286,7 +286,7 @@ func main() {
 	if !*flagNoAPI {
 		go startAPIServer()
 	}
-	
+
 	go monitorPoolPings()
 	go updateSystemMetrics()
 	if !*flagNoDebug {
@@ -306,7 +306,7 @@ func main() {
 	} else {
 		go Status()
 	}
-	
+
 	wg.Wait()
 }
 
@@ -359,7 +359,7 @@ func saveConfig() {
 
 func initDatabases() {
 	var err error
-	
+
 	dataDB, err = sql.Open("sqlite", "./data.db?cache=shared&mode=rwc")
 	if err != nil {
 		log.Fatalf("Failed to connect to data.db: %v", err)
@@ -367,11 +367,11 @@ func initDatabases() {
 	dataDB.SetMaxOpenConns(25)
 	dataDB.SetMaxIdleConns(5)
 	dataDB.SetConnMaxLifetime(5 * time.Minute)
-	
+
 	if err = dataDB.Ping(); err != nil {
 		log.Fatalf("Failed to ping data.db: %v", err)
 	}
-	
+
 	systemDB, err = sql.Open("sqlite", "./system.db?cache=shared&mode=rwc&_journal_mode=WAL")
 	if err != nil {
 		log.Fatalf("Failed to connect to system.db: %v", err)
@@ -379,11 +379,11 @@ func initDatabases() {
 	systemDB.SetMaxOpenConns(50)
 	systemDB.SetMaxIdleConns(10)
 	systemDB.SetConnMaxLifetime(5 * time.Minute)
-	
+
 	if err = systemDB.Ping(); err != nil {
 		log.Fatalf("Failed to ping system.db: %v", err)
 	}
-	
+
 	createTables()
 	if !*flagNoDebug {
 		LogInfo("Database connected (data.db + system.db - Pure Go)")
@@ -414,13 +414,13 @@ func createTables() {
 		`CREATE INDEX IF NOT EXISTS idx_ip ON miners(ip)`,
 		`CREATE INDEX IF NOT EXISTS idx_last_seen ON miners(last_seen)`,
 	}
-	
+
 	for _, query := range dataQueries {
 		if _, err := dataDB.Exec(query); err != nil {
 			log.Fatalf("Failed to create table in data.db: %v", err)
 		}
 	}
-	
+
 	systemQueries := []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA synchronous=NORMAL`,
@@ -450,7 +450,7 @@ func createTables() {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON network_traffic(timestamp)`,
 	}
-	
+
 	for _, query := range systemQueries {
 		if _, err := systemDB.Exec(query); err != nil {
 			log.Fatalf("Failed to create table in system.db: %v", err)
@@ -462,16 +462,16 @@ func batchShareProcessor() {
 	if *flagNoData {
 		return
 	}
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	
-	batch := make([]ShareRecord, 0, 1000)
-	
+
+	batch := make([]ShareRecord, 0, 5000)
+
 	for {
 		select {
 		case share := <-shareBatchChan:
 			batch = append(batch, share)
-			if len(batch) >= 1000 {
+			if len(batch) >= 5000 {
 				insertShareBatch(batch)
 				batch = batch[:0]
 			}
@@ -488,23 +488,28 @@ func insertShareBatch(batch []ShareRecord) {
 	if len(batch) == 0 {
 		return
 	}
-	
+
 	tx, err := systemDB.Begin()
 	if err != nil {
-		log.Printf("Failed to begin transaction: %v", err)
+		if !*flagNoDebug {
+			log.Printf("Failed to begin transaction: %v", err)
+		}
 		return
 	}
-	
+
 	stmt, err := tx.Prepare(`INSERT INTO shares 
 		(wallet, miner_name, ip, pool_name, job_id, accepted, difficulty, submitted_at) 
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
-		log.Printf("Failed to prepare statement: %v", err)
+		if !*flagNoDebug {
+			log.Printf("Failed to prepare statement: %v", err)
+		}
 		return
 	}
 	defer stmt.Close()
-	
+
+	successCount := 0
 	for _, share := range batch {
 		acceptedInt := 0
 		if share.Accepted {
@@ -512,13 +517,20 @@ func insertShareBatch(batch []ShareRecord) {
 		}
 		_, err := stmt.Exec(share.Wallet, share.MinerName, share.IP, share.PoolName,
 			share.JobID, acceptedInt, share.Difficulty, share.SubmittedAt)
-		if err != nil {
-			log.Printf("Failed to insert share: %v", err)
+		if err == nil {
+			successCount++
 		}
 	}
-	
+
 	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v", err)
+		if !*flagNoDebug {
+			log.Printf("Failed to commit transaction: %v", err)
+		}
+		return
+	}
+
+	if !*flagNoDebug && successCount > 0 {
+		LogDebug("Inserted %d/%d shares to database", successCount, len(batch))
 	}
 }
 
@@ -528,9 +540,9 @@ func batchTrafficProcessor() {
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
+
 	batch := make([]TrafficRecord, 0, 100)
-	
+
 	for {
 		select {
 		case traffic := <-trafficBatchChan:
@@ -552,12 +564,12 @@ func insertTrafficBatch(batch []TrafficRecord) {
 	if len(batch) == 0 {
 		return
 	}
-	
+
 	tx, err := systemDB.Begin()
 	if err != nil {
 		return
 	}
-	
+
 	stmt, err := tx.Prepare(`INSERT INTO network_traffic 
 		(timestamp, bytes_download, bytes_upload, packets_sent, packets_received) 
 		VALUES (?, ?, ?, ?, ?)`)
@@ -566,25 +578,25 @@ func insertTrafficBatch(batch []TrafficRecord) {
 		return
 	}
 	defer stmt.Close()
-	
+
 	for _, traffic := range batch {
 		stmt.Exec(traffic.Timestamp, traffic.BytesDownload, traffic.BytesUpload,
 			traffic.PacketsSent, traffic.PacketsReceived)
 	}
-	
+
 	tx.Commit()
 }
 
 func periodicTrafficSnapshot() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		download := atomic.LoadInt64(&totalDownloadAtomic)
 		upload := atomic.LoadInt64(&totalUploadAtomic)
 		sent := atomic.LoadInt64(&packetsSentAtomic)
 		received := atomic.LoadInt64(&packetsReceivedAtomic)
-		
+
 		select {
 		case trafficBatchChan <- TrafficRecord{
 			Timestamp:       time.Now(),
@@ -601,21 +613,21 @@ func periodicTrafficSnapshot() {
 func cleanupOldData() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		_, err := systemDB.Exec(`DELETE FROM shares WHERE submitted_at < datetime('now', '-365 days')`)
 		if err != nil {
 			log.Printf("Failed to cleanup old shares: %v", err)
 		}
-		
+
 		_, err = systemDB.Exec(`DELETE FROM network_traffic WHERE timestamp < datetime('now', '-180 days')`)
 		if err != nil {
 			log.Printf("Failed to cleanup old traffic: %v", err)
 		}
-		
+
 		systemDB.Exec("VACUUM")
 		dataDB.Exec("VACUUM")
-		
+
 		if !*flagNoDebug {
 			LogInfo("Database cleanup completed")
 		}
@@ -634,18 +646,18 @@ func saveMinerToDB(miner *MinerInfo) {
 	if *flagNoData {
 		return
 	}
-	
+
 	checkQuery := `SELECT id, shares_accepted, shares_rejected, bytes_download, bytes_upload, 
 		packets_sent, packets_received FROM miners 
 		WHERE wallet = ? AND ip = ? AND miner_name = ?`
 	var existingID int
 	var existingAccepted, existingRejected int64
 	var existingDownload, existingUpload, existingSent, existingReceived int64
-	
+
 	err := dataDB.QueryRow(checkQuery, miner.Wallet, miner.IP, miner.Name).Scan(
 		&existingID, &existingAccepted, &existingRejected,
 		&existingDownload, &existingUpload, &existingSent, &existingReceived)
-	
+
 	if err == sql.ErrNoRows {
 		insertQuery := `INSERT INTO miners (wallet, miner_name, ip, pool_name, shares_accepted, 
 			shares_rejected, bytes_download, bytes_upload, packets_sent, packets_received,
@@ -666,7 +678,7 @@ func saveMinerToDB(miner *MinerInfo) {
 			miner.CurrentHashrate, miner.AverageHashrate,
 			miner.LastSeen, miner.PoolName, existingID)
 	}
-	
+
 	if err != nil && !*flagNoDebug {
 		log.Printf("Failed to save miner to DB: %v", err)
 	}
@@ -675,17 +687,17 @@ func formatHashrate(hashrate float64) string {
 	if hashrate == 0 {
 		return "0 H/s"
 	}
-	
+
 	units := []string{"H/s", "KH/s", "MH/s", "GH/s", "TH/s", "PH/s"}
 	unitIndex := 0
 	value := hashrate
-	
+
 	// Chia cho 1000 thay vì 1024
 	for value >= 1000 && unitIndex < len(units)-1 {
 		value /= 1000
 		unitIndex++
 	}
-	
+
 	if value >= 100 {
 		return fmt.Sprintf("%.0f %s", value, units[unitIndex])
 	} else if value >= 10 {
@@ -694,9 +706,29 @@ func formatHashrate(hashrate float64) string {
 		return fmt.Sprintf("%.2f %s", value, units[unitIndex])
 	}
 }
+func sendShareToChannel(share ShareRecord) {
+	if *flagNoData {
+		return
+	}
+
+	select {
+	case shareBatchChan <- share:
+		return
+	default:
+		select {
+		case shareBatchChan <- share:
+			return
+		case <-time.After(100 * time.Millisecond):
+			if !*flagNoDebug {
+				LogWarning("Share batch channel full after retry, dropping record")
+			}
+		}
+	}
+}
+
 func calculateHashrate(miner *MinerInfo) {
 	now := time.Now()
-	
+
 	// Chỉ giữ shares trong 10 phút gần nhất
 	cutoff := now.Add(-10 * time.Minute)
 	validShares := make([]time.Time, 0)
@@ -706,17 +738,17 @@ func calculateHashrate(miner *MinerInfo) {
 		}
 	}
 	miner.ShareTimes = validShares
-	
+
 	if len(miner.ShareTimes) < 2 {
 		miner.CurrentHashrate = 0
 		return
 	}
-	
+
 	difficulty := miner.Difficulty
 	if difficulty == 0 {
 		difficulty = 1.0
 	}
-	
+
 	// Tính hashrate đơn giản: (số shares * difficulty) / thời gian
 	totalTime := miner.ShareTimes[len(miner.ShareTimes)-1].Sub(miner.ShareTimes[0]).Seconds()
 	if totalTime > 0 {
@@ -726,7 +758,7 @@ func calculateHashrate(miner *MinerInfo) {
 		// Difficulty đã tính sẵn, không cần nhân 2^32
 		miner.CurrentHashrate = sharesPerSecond * difficulty
 	}
-	
+
 	// Tính average hashrate (EMA - Exponential Moving Average)
 	if miner.AverageHashrate == 0 {
 		miner.AverageHashrate = miner.CurrentHashrate
@@ -739,28 +771,28 @@ func calculateHashrate(miner *MinerInfo) {
 func initSystemMetrics() {
 	systemMtx.Lock()
 	defer systemMtx.Unlock()
-	
+
 	cpuInfo, _ := cpu.Info()
 	if len(cpuInfo) > 0 {
 		systemMetrics.CPUModel = cpuInfo[0].ModelName
 		systemMetrics.CPUCores = int(cpuInfo[0].Cores)
 	}
-	
+
 	hostInfo, _ := host.Info()
 	if hostInfo != nil {
 		systemMetrics.OS = hostInfo.OS + " " + hostInfo.PlatformVersion
 	}
-	
+
 	memInfo, _ := mem.VirtualMemory()
 	if memInfo != nil {
 		systemMetrics.RAMTotal = memInfo.Total
 	}
-	
+
 	diskInfo, _ := disk.Usage("/")
 	if diskInfo != nil {
 		systemMetrics.DiskTotal = diskInfo.Total
 	}
-	
+
 	go func() {
 		resp, err := http.Get("https://api.ipify.org?format=text")
 		if err == nil {
@@ -777,39 +809,39 @@ func initSystemMetrics() {
 func updateSystemMetrics() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		systemMtx.Lock()
-		
+
 		cpuPercent, _ := cpu.Percent(time.Second, false)
 		if len(cpuPercent) > 0 {
 			systemMetrics.CPUUsage = cpuPercent[0]
 		}
-		
+
 		memInfo, _ := mem.VirtualMemory()
 		if memInfo != nil {
 			systemMetrics.RAMUsed = memInfo.Used
 		}
-		
+
 		diskInfo, _ := disk.Usage("/")
 		if diskInfo != nil {
 			systemMetrics.DiskUsed = diskInfo.Used
 		}
-		
+
 		systemMetrics.Uptime = time.Since(startTime)
-		
+
 		minersMutex.RLock()
 		systemMetrics.ActiveMiners = len(miners)
 		minersMutex.RUnlock()
-		
+
 		systemMetrics.TotalDownload = atomic.LoadInt64(&totalDownloadAtomic)
 		systemMetrics.TotalUpload = atomic.LoadInt64(&totalUploadAtomic)
 		systemMetrics.PacketsSent = atomic.LoadInt64(&packetsSentAtomic)
 		systemMetrics.PacketsReceived = atomic.LoadInt64(&packetsReceivedAtomic)
-		
+
 		systemMetrics.DataDBSize = getDBSize("./data.db")
 		systemMetrics.SystemDBSize = getDBSize("./system.db")
-		
+
 		systemMtx.Unlock()
 	}
 }
@@ -817,7 +849,7 @@ func updateSystemMetrics() {
 func monitorPoolPings() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		for poolName, poolConf := range config.Pools {
 			go measurePoolPing(poolName, poolConf)
@@ -833,25 +865,25 @@ func measurePoolPing(poolName string, poolConf PoolConfig) {
 	}
 	conn.Close()
 	pingTime := time.Since(start).Seconds() * 1000
-	
+
 	poolMetricsMtx.Lock()
 	defer poolMetricsMtx.Unlock()
-	
+
 	if poolMetrics[poolName] == nil {
 		poolMetrics[poolName] = &PoolMetrics{
 			Name: poolName, PingSamples: make([]float64, 0), AcceptTimes: make([]float64, 0),
 		}
 	}
-	
+
 	pm := poolMetrics[poolName]
 	pm.CurrentPing = pingTime
 	pm.PingSamples = append(pm.PingSamples, pingTime)
 	pm.LastPingTime = time.Now()
-	
+
 	if len(pm.PingSamples) > 100 {
 		pm.PingSamples = pm.PingSamples[1:]
 	}
-	
+
 	sum := 0.0
 	for _, p := range pm.PingSamples {
 		sum += p
@@ -862,20 +894,20 @@ func measurePoolPing(poolName string, poolConf PoolConfig) {
 func recordAcceptTime(poolName string, duration float64) {
 	poolMetricsMtx.Lock()
 	defer poolMetricsMtx.Unlock()
-	
+
 	if poolMetrics[poolName] == nil {
 		poolMetrics[poolName] = &PoolMetrics{
 			Name: poolName, PingSamples: make([]float64, 0), AcceptTimes: make([]float64, 0),
 		}
 	}
-	
+
 	pm := poolMetrics[poolName]
 	pm.AcceptTimes = append(pm.AcceptTimes, duration)
-	
+
 	if len(pm.AcceptTimes) > 100 {
 		pm.AcceptTimes = pm.AcceptTimes[1:]
 	}
-	
+
 	sum := 0.0
 	for _, t := range pm.AcceptTimes {
 		sum += t
@@ -889,12 +921,12 @@ func startTunnel(tunnelName string, tunnelConf TunnelConfig) {
 		LogError("Tunnel %s: Pool %s not found in config", tunnelName, tunnelConf.Pool)
 		return
 	}
-	
+
 	addr := fmt.Sprintf("%s:%d", tunnelConf.IP, tunnelConf.Port)
-	
+
 	var listener net.Listener
 	var err error
-	
+
 	// Create listener with or without TLS
 	if *flagTLS && tlsConfig != nil {
 		listener, err = tls.Listen("tcp", addr, tlsConfig)
@@ -916,7 +948,7 @@ func startTunnel(tunnelName string, tunnelConf TunnelConfig) {
 		}
 	}
 	defer listener.Close()
-	
+
 	for {
 		clientConn, err := listener.Accept()
 		if err != nil {
@@ -931,13 +963,13 @@ func startTunnel(tunnelName string, tunnelConf TunnelConfig) {
 
 func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfig) {
 	defer clientConn.Close()
-	
+
 	clientAddr := clientConn.RemoteAddr().String()
 	clientIP, clientPort, _ := net.SplitHostPort(clientAddr)
 	if !*flagNoDebug {
 		LogDebug("New connection from %s:%s", clientIP, clientPort)
 	}
-	
+
 	poolAddr := fmt.Sprintf("%s:%d", poolConf.Host, poolConf.Port)
 	poolConn, err := net.Dial("tcp", poolAddr)
 	if err != nil {
@@ -947,11 +979,11 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 		return
 	}
 	defer poolConn.Close()
-	
+
 	if !*flagNoDebug {
 		LogInfo("Connected to pool %s (%s)", poolAddr, poolConf.Name)
 	}
-	
+
 	minerKey := fmt.Sprintf("%s:%s", clientIP, clientPort)
 	minersMutex.Lock()
 	miners[minerKey] = &MinerInfo{
@@ -961,7 +993,7 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 		Difficulty: 1.0,
 	}
 	minersMutex.Unlock()
-	
+
 	done := make(chan bool, 2)
 	go func() {
 		defer func() { done <- true }()
@@ -971,13 +1003,13 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 		defer func() { done <- true }()
 		proxyData(poolConn, clientConn, tunnelName, poolConf, minerKey, false)
 	}()
-	
+
 	<-done
-	
+
 	if !*flagNoDebug {
 		LogWarning("Connection closed for %s:%s", clientIP, clientPort)
 	}
-	
+
 	minersMutex.Lock()
 	if miner, exists := miners[minerKey]; exists {
 		saveMinerToDB(miner)
@@ -989,11 +1021,11 @@ func handleConnection(tunnelName string, clientConn net.Conn, poolConf PoolConfi
 func proxyData(src, dst net.Conn, tunnelName string, poolConf PoolConfig, minerKey string, clientToPool bool) {
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		lineLen := int64(len(line) + 1)
-		
+
 		if clientToPool {
 			atomic.AddInt64(&totalUploadAtomic, lineLen)
 			atomic.AddInt64(&packetsSentAtomic, 1)
@@ -1001,7 +1033,7 @@ func proxyData(src, dst net.Conn, tunnelName string, poolConf PoolConfig, minerK
 			atomic.AddInt64(&totalDownloadAtomic, lineLen)
 			atomic.AddInt64(&packetsReceivedAtomic, 1)
 		}
-		
+
 		minersMutex.Lock()
 		if miner, exists := miners[minerKey]; exists {
 			if clientToPool {
@@ -1014,13 +1046,13 @@ func proxyData(src, dst net.Conn, tunnelName string, poolConf PoolConfig, minerK
 			miner.LastSeen = time.Now()
 		}
 		minersMutex.Unlock()
-		
+
 		if clientToPool {
 			parseClientMessage(line, tunnelName, poolConf, minerKey)
 		} else {
 			parsePoolMessage(line, tunnelName, poolConf, minerKey)
 		}
-		
+
 		_, err := fmt.Fprintf(dst, "%s\n", line)
 		if err != nil {
 			break
@@ -1033,14 +1065,14 @@ func parseClientMessage(message, tunnelName string, poolConf PoolConfig, minerKe
 	if err := json.Unmarshal([]byte(message), &msg); err != nil {
 		return
 	}
-	
+
 	minersMutex.Lock()
 	miner, exists := miners[minerKey]
 	if !exists {
 		minersMutex.Unlock()
 		return
 	}
-	
+
 	switch msg.Method {
 	case "mining.authorize":
 		if params, ok := msg.Params.([]interface{}); ok && len(params) > 0 {
@@ -1059,17 +1091,17 @@ func parseClientMessage(message, tunnelName string, poolConf PoolConfig, minerKe
 				jobID = jid
 				miner.JobID = jobID
 			}
-			
+
 			miner.LastShareTime = time.Now()
 			miner.ShareTimes = append(miner.ShareTimes, time.Now())
-			
+
 			LogShare("Share submitted: %s (%s:%s) job=%s pool=%s",
 				miner.Name, miner.IP, miner.Port, jobID, poolConf.Name)
 		}
 	case "mining.extranonce.subscribe":
 		// Handle extranonce subscription
 	}
-	
+
 	miner.LastSeen = time.Now()
 	minersMutex.Unlock()
 }
@@ -1079,19 +1111,19 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 	if err := json.Unmarshal([]byte(message), &msg); err != nil {
 		return
 	}
-	
+
 	minersMutex.Lock()
 	miner, exists := miners[minerKey]
 	if !exists {
 		minersMutex.Unlock()
 		return
 	}
-	
+
 	if msg.Error != nil {
 		LogError("Miner %s (%s:%s) * Error from pool %s: %v",
 			miner.Name, miner.IP, miner.Port, poolConf.Name, msg.Error)
 	}
-	
+
 	if msg.Method == "mining.notify" {
 		if params, ok := msg.Params.([]interface{}); ok && len(params) > 0 {
 			if jobID, ok := params[0].(string); ok {
@@ -1101,7 +1133,7 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 			}
 		}
 	}
-	
+
 	if msg.Method == "mining.set_difficulty" {
 		if params, ok := msg.Params.([]interface{}); ok && len(params) > 0 {
 			if diff, ok := params[0].(float64); ok {
@@ -1110,16 +1142,16 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 			}
 		}
 	}
-	
+
 	if msg.ID != nil && msg.Result != nil {
 		if result, ok := msg.Result.(bool); ok {
 			submitTime := time.Since(miner.LastShareTime).Seconds()
-			
+
 			if result {
 				miner.SharesAccepted++
-				
+
 				calculateHashrate(miner)
-				
+
 				poolMetricsMtx.Lock()
 				if poolMetrics[poolConf.Name] == nil {
 					poolMetrics[poolConf.Name] = &PoolMetrics{
@@ -1128,11 +1160,10 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 				}
 				poolMetrics[poolConf.Name].SharesAccepted++
 				poolMetricsMtx.Unlock()
-				
+
 				recordAcceptTime(poolConf.Name, submitTime*1000)
-				
-				select {
-				case shareBatchChan <- ShareRecord{
+
+				go sendShareToChannel(ShareRecord{
 					Wallet:      miner.Wallet,
 					MinerName:   miner.Name,
 					IP:          miner.IP,
@@ -1141,17 +1172,14 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 					Accepted:    true,
 					Difficulty:  miner.Difficulty,
 					SubmittedAt: time.Now(),
-				}:
-				default:
-					LogWarning("Share batch channel full, dropping share record")
-				}
-				
+				})
+
 				LogShare("✓ ACCEPTED: %s (%s:%s) pool=%s (%.0fms) [%s avg=%s]",
-					miner.Name, miner.IP, miner.Port, poolConf.Name, submitTime*1000, 
+					miner.Name, miner.IP, miner.Port, poolConf.Name, submitTime*1000,
 					formatHashrate(miner.CurrentHashrate), formatHashrate(miner.AverageHashrate))
 			} else {
 				miner.SharesRejected++
-				
+
 				poolMetricsMtx.Lock()
 				if poolMetrics[poolConf.Name] == nil {
 					poolMetrics[poolConf.Name] = &PoolMetrics{
@@ -1160,9 +1188,8 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 				}
 				poolMetrics[poolConf.Name].SharesRejected++
 				poolMetricsMtx.Unlock()
-				
-				select {
-				case shareBatchChan <- ShareRecord{
+
+				go sendShareToChannel(ShareRecord{
 					Wallet:      miner.Wallet,
 					MinerName:   miner.Name,
 					IP:          miner.IP,
@@ -1171,16 +1198,14 @@ func parsePoolMessage(message, tunnelName string, poolConf PoolConfig, minerKey 
 					Accepted:    false,
 					Difficulty:  miner.Difficulty,
 					SubmittedAt: time.Now(),
-				}:
-				default:
-				}
-				
+				})
+
 				LogError("✗ REJECTED: %s (%s:%s) pool=%s",
 					miner.Name, miner.IP, miner.Port, poolConf.Name)
 			}
 		}
 	}
-	
+
 	miner.LastSeen = time.Now()
 	minersMutex.Unlock()
 }
@@ -1210,25 +1235,25 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	
+
 	logClientsMtx.Lock()
 	logClients[conn] = true
 	logClientsMtx.Unlock()
-	
+
 	conn.WriteJSON(LogMessage{
 		Timestamp: getCurrentTime(),
 		Level:     "INFO",
 		Message:   "Connected to log stream",
 		Color:     "green",
 	})
-	
+
 	defer func() {
 		logClientsMtx.Lock()
 		delete(logClients, conn)
 		logClientsMtx.Unlock()
 		conn.Close()
 	}()
-	
+
 	for {
 		if _, _, err := conn.NextReader(); err != nil {
 			break
@@ -1240,14 +1265,14 @@ func LogAndBroadcast(level, color, format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
 	timestamp := getCurrentTime()
 	fmt.Printf("%s[%s]%s %s %s\n", color, level, ColorReset, timestamp, message)
-	
+
 	logMsg := LogMessage{
 		Timestamp: timestamp,
 		Level:     level,
 		Message:   message,
 		Color:     getColorName(color),
 	}
-	
+
 	select {
 	case logBroadcast <- logMsg:
 	default:
@@ -1310,9 +1335,9 @@ func startAPIServer() {
 	http.HandleFunc("/api/shares/stats", handleSharesStats)
 	http.HandleFunc("/metrics", handlePrometheusMetrics)
 	http.HandleFunc("/api/logs/stream", handleWebSocket)
-	
+
 	go handleLogStream()
-	
+
 	addr := fmt.Sprintf(":%d", config.APIPort)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
@@ -1321,7 +1346,7 @@ func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 	systemMtx.RLock()
 	poolMetricsMtx.RLock()
 	minersMutex.RLock()
-	
+
 	poolsData := make(map[string]interface{})
 	for name, pm := range poolMetrics {
 		poolsData[name] = map[string]interface{}{
@@ -1333,7 +1358,7 @@ func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 			"last_ping_time":     pm.LastPingTime.Format(time.RFC3339),
 		}
 	}
-	
+
 	minersData := make([]map[string]interface{}, 0)
 	for _, miner := range miners {
 		minersData = append(minersData, map[string]interface{}{
@@ -1349,7 +1374,7 @@ func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 			"uptime_seconds":   time.Since(miner.ConnectedAt).Seconds(),
 		})
 	}
-	
+
 	response := map[string]interface{}{
 		"system": map[string]interface{}{
 			"cpu_model":          systemMetrics.CPUModel,
@@ -1388,11 +1413,11 @@ func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 		},
 		"pools": poolsData,
 	}
-	
+
 	minersMutex.RUnlock()
 	poolMetricsMtx.RUnlock()
 	systemMtx.RUnlock()
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -1403,28 +1428,28 @@ func handleNetworkStats(w http.ResponseWriter, r *http.Request) {
 	if hoursStr != "" {
 		fmt.Sscanf(hoursStr, "%d", &hours)
 	}
-	
+
 	cutoff := time.Now().Add(-time.Duration(hours) * time.Hour)
-	
+
 	query := `SELECT timestamp, bytes_download, bytes_upload, packets_sent, packets_received 
 		FROM network_traffic WHERE timestamp > ? ORDER BY timestamp ASC`
-	
+
 	rows, err := systemDB.Query(query, cutoff)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
-	
+
 	var stats []map[string]interface{}
 	for rows.Next() {
 		var timestamp time.Time
 		var download, upload, sent, received int64
-		
+
 		if err := rows.Scan(&timestamp, &download, &upload, &sent, &received); err != nil {
 			continue
 		}
-		
+
 		stats = append(stats, map[string]interface{}{
 			"timestamp":        timestamp.Format(time.RFC3339),
 			"bytes_download":   download,
@@ -1433,13 +1458,13 @@ func handleNetworkStats(w http.ResponseWriter, r *http.Request) {
 			"packets_received": received,
 		})
 	}
-	
+
 	response := map[string]interface{}{
 		"hours":       hours,
 		"data_points": len(stats),
 		"stats":       stats,
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -1451,13 +1476,13 @@ func handleSharesStats(w http.ResponseWriter, r *http.Request) {
 	if hoursStr != "" {
 		fmt.Sscanf(hoursStr, "%d", &hours)
 	}
-	
+
 	cutoff := time.Now().Add(-time.Duration(hours) * time.Hour)
-	
+
 	var query string
 	var rows *sql.Rows
 	var err error
-	
+
 	if wallet != "" {
 		query = `SELECT wallet, miner_name, pool_name, accepted, difficulty, submitted_at 
 			FROM shares WHERE wallet = ? AND submitted_at > ? ORDER BY submitted_at DESC LIMIT 1000`
@@ -1467,33 +1492,33 @@ func handleSharesStats(w http.ResponseWriter, r *http.Request) {
 			FROM shares WHERE submitted_at > ? ORDER BY submitted_at DESC LIMIT 1000`
 		rows, err = systemDB.Query(query, cutoff)
 	}
-	
+
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
-	
+
 	var shares []map[string]interface{}
 	acceptedCount := 0
 	rejectedCount := 0
-	
+
 	for rows.Next() {
 		var w, name, pool string
 		var accepted int
 		var difficulty float64
 		var submitted time.Time
-		
+
 		if err := rows.Scan(&w, &name, &pool, &accepted, &difficulty, &submitted); err != nil {
 			continue
 		}
-		
+
 		if accepted == 1 {
 			acceptedCount++
 		} else {
 			rejectedCount++
 		}
-		
+
 		shares = append(shares, map[string]interface{}{
 			"wallet":       w,
 			"miner_name":   name,
@@ -1503,7 +1528,7 @@ func handleSharesStats(w http.ResponseWriter, r *http.Request) {
 			"submitted_at": submitted.Format(time.RFC3339),
 		})
 	}
-	
+
 	response := map[string]interface{}{
 		"wallet":         wallet,
 		"hours":          hours,
@@ -1518,7 +1543,7 @@ func handleSharesStats(w http.ResponseWriter, r *http.Request) {
 		}(),
 		"shares": shares,
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -1529,7 +1554,7 @@ func handleMinerInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Wallet address required", http.StatusBadRequest)
 		return
 	}
-	
+
 	query := `SELECT wallet, miner_name, ip, pool_name, shares_accepted, shares_rejected,
 		bytes_download, bytes_upload, packets_sent, packets_received, 
 		current_hashrate, average_hashrate, connected_at, last_seen
@@ -1540,7 +1565,7 @@ func handleMinerInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	
+
 	var minersList []map[string]interface{}
 	for rows.Next() {
 		var (
@@ -1556,22 +1581,22 @@ func handleMinerInfo(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		
+
 		uptime := lastSeen.Sub(connectedAt).Seconds()
 		minerData := map[string]interface{}{
 			"wallet": dbWallet, "miner_name": minerName, "ip": ip, "pool_name": poolName,
 			"shares_accepted": sharesAccepted, "shares_rejected": sharesRejected,
 			"bytes_download": bytesDownload, "bytes_upload": bytesUpload,
 			"packets_sent": packetsSent, "packets_received": packetsReceived,
-			"current_hashrate":     formatHashrate(currentHashrate),
-			"average_hashrate":     formatHashrate(averageHashrate),
-			"uptime_seconds":       uptime,
-			"connected_at":         connectedAt.Format(time.RFC3339),
-			"last_seen":            lastSeen.Format(time.RFC3339),
+			"current_hashrate": formatHashrate(currentHashrate),
+			"average_hashrate": formatHashrate(averageHashrate),
+			"uptime_seconds":   uptime,
+			"connected_at":     connectedAt.Format(time.RFC3339),
+			"last_seen":        lastSeen.Format(time.RFC3339),
 		}
 		minersList = append(minersList, minerData)
 	}
-	
+
 	minersMutex.RLock()
 	var activeMinerData map[string]interface{}
 	for _, miner := range miners {
@@ -1594,12 +1619,12 @@ func handleMinerInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	minersMutex.RUnlock()
-	
+
 	response := map[string]interface{}{
 		"wallet": wallet, "active_miner": activeMinerData,
 		"historical_data": minersList, "total_miners": len(minersList),
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -1608,62 +1633,62 @@ func handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	systemMtx.RLock()
 	poolMetricsMtx.RLock()
 	minersMutex.RLock()
-	
+
 	w.Header().Set("Content-Type", "text/plain")
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_uptime_seconds Uptime in seconds\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_uptime_seconds gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_uptime_seconds %.2f\n\n", systemMetrics.Uptime.Seconds())
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_active_miners Number of active miners\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_active_miners gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_active_miners %d\n\n", systemMetrics.ActiveMiners)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_cpu_usage_percent CPU usage percentage\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_cpu_usage_percent gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_cpu_usage_percent %.2f\n\n", systemMetrics.CPUUsage)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_cpu_cores Number of CPU cores\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_cpu_cores gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_cpu_cores %d\n\n", systemMetrics.CPUCores)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_ram_bytes RAM usage in bytes\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_ram_bytes gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_ram_bytes{type=\"total\"} %d\n", systemMetrics.RAMTotal)
 	fmt.Fprintf(w, "mining_tunnel_ram_bytes{type=\"used\"} %d\n\n", systemMetrics.RAMUsed)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_disk_bytes Disk usage in bytes\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_disk_bytes gauge\n")
 	fmt.Fprintf(w, "mining_tunnel_disk_bytes{type=\"total\"} %d\n", systemMetrics.DiskTotal)
 	fmt.Fprintf(w, "mining_tunnel_disk_bytes{type=\"used\"} %d\n\n", systemMetrics.DiskUsed)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_bytes_total Total bytes transferred\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_bytes_total counter\n")
 	fmt.Fprintf(w, "mining_tunnel_bytes_total{direction=\"download\"} %d\n", systemMetrics.TotalDownload)
 	fmt.Fprintf(w, "mining_tunnel_bytes_total{direction=\"upload\"} %d\n\n", systemMetrics.TotalUpload)
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_packets_total Total packets transferred\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_packets_total counter\n")
 	fmt.Fprintf(w, "mining_tunnel_packets_total{direction=\"sent\"} %d\n", systemMetrics.PacketsSent)
 	fmt.Fprintf(w, "mining_tunnel_packets_total{direction=\"received\"} %d\n\n", systemMetrics.PacketsReceived)
-	
+
 	// THÊM POOL METRICS (từ code cũ)
 	for poolName, pm := range poolMetrics {
 		fmt.Fprintf(w, "# HELP mining_tunnel_pool_ping_ms Pool ping in milliseconds\n")
 		fmt.Fprintf(w, "# TYPE mining_tunnel_pool_ping_ms gauge\n")
 		fmt.Fprintf(w, "mining_tunnel_pool_ping_ms{pool=\"%s\",type=\"current\"} %.2f\n", poolName, pm.CurrentPing)
 		fmt.Fprintf(w, "mining_tunnel_pool_ping_ms{pool=\"%s\",type=\"average\"} %.2f\n\n", poolName, pm.AveragePing)
-		
+
 		fmt.Fprintf(w, "# HELP mining_tunnel_pool_accept_time_ms Average accept time in milliseconds\n")
 		fmt.Fprintf(w, "# TYPE mining_tunnel_pool_accept_time_ms gauge\n")
 		fmt.Fprintf(w, "mining_tunnel_pool_accept_time_ms{pool=\"%s\"} %.2f\n\n", poolName, pm.AvgAcceptTime)
-		
+
 		fmt.Fprintf(w, "# HELP mining_tunnel_pool_shares_total Total shares by pool\n")
 		fmt.Fprintf(w, "# TYPE mining_tunnel_pool_shares_total counter\n")
 		fmt.Fprintf(w, "mining_tunnel_pool_shares_total{pool=\"%s\",status=\"accepted\"} %d\n", poolName, pm.SharesAccepted)
 		fmt.Fprintf(w, "mining_tunnel_pool_shares_total{pool=\"%s\",status=\"rejected\"} %d\n\n", poolName, pm.SharesRejected)
 	}
-	
+
 	fmt.Fprintf(w, "# HELP mining_tunnel_miner_hashrate Miner hashrate in H/s\n")
 	fmt.Fprintf(w, "# TYPE mining_tunnel_miner_hashrate gauge\n")
 	for _, miner := range miners {
@@ -1675,7 +1700,7 @@ func handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fmt.Fprintf(w, "\n")
-	
+
 	minersMutex.RUnlock()
 	poolMetricsMtx.RUnlock()
 	systemMtx.RUnlock()
